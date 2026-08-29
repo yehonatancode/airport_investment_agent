@@ -10,3 +10,6 @@ data_cache/
 *.log
 
 .idea/
+
+# Local working draft - final DESIGN.md is written by hand from this, not committed as-is.
+DESIGN_DRAFT.md
