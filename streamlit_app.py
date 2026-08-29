@@ -15,8 +15,11 @@ Run with: streamlit run streamlit_app.py
 """
 
 import asyncio
+import json
+import re
 
 import streamlit as st
+import streamlit.components.v1 as components
 from claude_agent_sdk import ClaudeSDKClient
 
 from cli import build_agent_options, run_turn
@@ -28,6 +31,30 @@ st.caption(
     "strong candidates for terminal expansion. Backed by real BTS data and a "
     "deterministic scoring engine - see DESIGN.md for methodology."
 )
+
+speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=True)
+
+
+def speak(text: str) -> None:
+    """Speaks text via the browser's built-in SpeechSynthesis API - no
+    paid/API-based TTS service involved. Rendered as a near-invisible
+    components.v1.html iframe; json.dumps() safely escapes the response
+    text (which can contain quotes/markdown/backticks) into a JS string
+    literal. Only called once per NEW assistant reply (never from the
+    message-history replay loop above), so old messages aren't re-spoken
+    on every Streamlit rerun.
+    """
+    # Strip markdown table pipes/asterisks so speech doesn't read out
+    # formatting characters - a light cleanup, not a full markdown parser.
+    clean = re.sub(r"[|#*_`]", " ", text)
+    js = f"""
+    <script>
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance({json.dumps(clean)});
+        window.speechSynthesis.speak(u);
+    </script>
+    """
+    components.html(js, height=0, width=0)
 
 
 def get_event_loop() -> asyncio.AbstractEventLoop:
@@ -70,6 +97,7 @@ if prompt:
                 st.markdown(event["content"])
                 reply_text_parts.append(event["content"])
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": "\n\n".join(reply_text_parts)}
-    )
+    reply_text = "\n\n".join(reply_text_parts)
+    st.session_state.messages.append({"role": "assistant", "content": reply_text})
+    if speak_enabled and reply_text:
+        speak(reply_text)
