@@ -1,1 +1,2 @@
 claude-agent-sdk==0.2.144
+streamlit==1.62.0

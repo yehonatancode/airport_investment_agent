@@ -42,9 +42,15 @@ Requires `ANTHROPIC_API_KEY` in the environment (or an active `ant auth login` p
 ## Running it
 
 ```bash
-python3 cli.py            # interactive chat
-python3 cli.py --test     # runs the assignment's example questions + edge cases
+python3 cli.py                       # interactive chat, in the terminal
+python3 cli.py --test                # runs the assignment's example questions + edge cases
+streamlit run streamlit_app.py       # same agent, in a browser chat UI
 ```
+
+The web UI (`streamlit_app.py`) is a thin wrapper around the same agent
+wiring and query loop `cli.py` uses (`build_agent_options()` / `run_turn()`
+in `cli.py`) - it does not define its own tool registration or a separate
+agent, so the CLI and the browser UI are guaranteed to behave identically.
 
 First-time queries against a new time period download and cache the
 underlying BTS files locally (`data_cache/`, gitignored - a few minutes,
@@ -59,7 +65,8 @@ outside the cache still resolves correctly, just live.
 |---|---|
 | `airport_stats_tool.py` | Fetch tool - pulls and aggregates real BTS data per airport |
 | `scoring_tool.py` | Deterministic gate + modifier scoring engine |
-| `cli.py` | Persistent chat session (interactive or `--test`) |
+| `cli.py` | Agent wiring + persistent chat session (interactive or `--test`) |
+| `streamlit_app.py` | Browser chat UI, reuses `cli.py`'s agent logic |
 | `generate_cache.py` | Builds `airport_stats_cache.json` |
 | `DESIGN.md` | Assumptions, tradeoffs, and known limitations |
 | `toy_tool.py` | Minimal reference example of the SDK's `@tool` pattern |

@@ -59,20 +59,12 @@ TEST_QUESTIONS = [
 ]
 
 
-async def ask(client: ClaudeSDKClient, prompt: str) -> None:
-    print(f"\n{'=' * 80}\nYOU: {prompt}\n{'=' * 80}")
-    await client.query(prompt)
-    async for message in client.receive_response():
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    print(block.text)
-                elif isinstance(block, ToolUseBlock):
-                    print(f"[tool call] {block.name}({block.input})")
-
-
-async def main() -> None:
-    options = ClaudeAgentOptions(
+def build_agent_options() -> ClaudeAgentOptions:
+    """The one place agent wiring (servers, allowed tools, model, prompt) is
+    defined. Both the CLI and the Streamlit UI call this - neither forks its
+    own copy of the tool-registration/options logic.
+    """
+    return ClaudeAgentOptions(
         mcp_servers={"airport_data": data_server, "airport_scoring": scoring_server},
         allowed_tools=[
             "mcp__airport_data__fetch_airport_stats",
@@ -82,7 +74,39 @@ async def main() -> None:
         model="claude-sonnet-5",
         system_prompt=SYSTEM_PROMPT,
     )
-    async with ClaudeSDKClient(options=options) as client:
+
+
+async def run_turn(client: ClaudeSDKClient, prompt: str) -> list[dict]:
+    """Runs one query/response turn on an already-open client and returns
+    structured events instead of printing - the shared core so a UI (CLI
+    prints, Streamlit renders) can consume the same underlying agent call
+    without re-implementing the query/receive_response loop.
+    """
+    events = []
+    await client.query(prompt)
+    async for message in client.receive_response():
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    events.append({"type": "text", "content": block.text})
+                elif isinstance(block, ToolUseBlock):
+                    events.append(
+                        {"type": "tool_call", "name": block.name, "input": block.input}
+                    )
+    return events
+
+
+async def ask(client: ClaudeSDKClient, prompt: str) -> None:
+    print(f"\n{'=' * 80}\nYOU: {prompt}\n{'=' * 80}")
+    for event in await run_turn(client, prompt):
+        if event["type"] == "text":
+            print(event["content"])
+        elif event["type"] == "tool_call":
+            print(f"[tool call] {event['name']}({event['input']})")
+
+
+async def main() -> None:
+    async with ClaudeSDKClient(options=build_agent_options()) as client:
         if "--test" in sys.argv:
             for q in TEST_QUESTIONS:
                 await ask(client, q)
