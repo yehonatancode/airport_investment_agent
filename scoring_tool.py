@@ -141,13 +141,40 @@ def _ramp_multiplier(value: float, threshold: float, higher_is_better: bool) -> 
 
 
 def compute_gate(operations: float, avg_departure_delay: float) -> dict:
+    """Ops and delay are preconditions to combine with AND, not signals to blend.
+
+    Why min(), not an average or product: a gate answers "does the basic
+    investment case even exist," not "how good is this airport on balance."
+    Those are different questions. If ops and delay were averaged, an
+    airport with enormous operations but zero delay pressure could drag a
+    near-zero delay score up to something respectable-looking - but "huge
+    and perfectly smooth" isn't a congestion story, so there's nothing to
+    fund. min() enforces that BOTH preconditions must independently hold;
+    one strong factor is not allowed to paper over the other's absence.
+    That's also why the combined multiplier, not each factor separately,
+    gates the final score to zero.
+
+    Why delay uses higher_is_better=True, same direction as ops (this is
+    the Fix 2 story - it shipped backwards once): the question this score
+    asks isn't "is this airport pleasant to fly through," it's "is there
+    real demand/congestion strain here that argues for terminal expansion."
+    Elevated delay is exactly that strain signal, not a quality defect - so
+    it has to pass the gate in the same direction as high ops, not the
+    opposite one. Getting this backwards silently breaks the score's whole
+    premise: under the original (wrong) direction, a smoothly-run mega-hub
+    like ORD and a nearly-irrelevant small airport both landed at gate
+    multiplier 0.0 - for completely opposite, non-comparable reasons - and
+    nothing in the output distinguished "too small to matter" from "too
+    smooth to be a congestion story." Flipping the direction was the fix;
+    the ramp mechanics below didn't need to change at all.
+    """
     ops_mult, ops_near = _ramp_multiplier(
         operations, GATE_THRESHOLDS["min_operations"], higher_is_better=True
     )
     delay_mult, delay_near = _ramp_multiplier(
         avg_departure_delay, GATE_THRESHOLDS["min_avg_delay_minutes"], higher_is_better=True
     )
-    combined = min(ops_mult, delay_mult)  # both must hold - weakest link wins
+    combined = min(ops_mult, delay_mult)  # AND, not a blend - see docstring above
     return {
         "ops_multiplier": round(ops_mult, 3),
         "delay_multiplier": round(delay_mult, 3),
@@ -167,6 +194,22 @@ def _normalize(value: float, bounds: tuple[float, float]) -> float:
 
 
 def compute_modifier_composite(factors: dict[str, float | None]) -> dict:
+    """Normalizes every factor onto 0-100 BEFORE its weight is applied.
+
+    Order matters here (this is the Fix 1 story - it shipped the other way
+    round once). The first version summed weight * raw_value directly. But
+    the raw factors don't live on comparable scales: long_haul_share is a
+    natural 0-100 share (e.g. 21.8), while the two growth-trend factors are
+    typically single-digit rates (e.g. 2.3). Concrete case that surfaced
+    this: BOS's composite was dominated by its 21.8 long_haul_share (only
+    12.5% weight) over its 2.3% passenger growth (50% weight) - the 50%
+    weight was real in the formula but not in the outcome, because 21.8 is
+    an order of magnitude bigger than 2.3 before any weight is even
+    multiplied in. Normalizing each factor onto the same 0-100 scale first
+    (_normalize, clamped at the edges against MODIFIER_BOUNDS) removes the
+    scale mismatch, so "50/37.5/12.5" describes actual influence on the
+    composite, not just a coefficient that gets swamped by units.
+    """
     weights = redistribute_weights(factors, MODIFIER_WEIGHTS)
     normalized = {k: _normalize(factors[k], MODIFIER_BOUNDS[k]) for k in weights}
     composite = sum(normalized[k] * (weights[k] / 100) for k in weights)
@@ -202,6 +245,15 @@ def score_airport(airport_code: str) -> dict:
 
     return {
         "airport_code": stats["airport_code"],
+        # Stamped on every score so a cached or freshly-returned result can be
+        # checked against the arithmetic that's currently in this file. This
+        # formula changed three times in one session (unnormalized modifiers
+        # -> normalized -> delay direction corrected); without this field,
+        # neither a reviewer nor the agent itself has any way to tell a score
+        # computed under an old, since-fixed formula apart from a current one
+        # - the JSON looks identical either way except for this string. Bump
+        # FORMULA_VERSION (see definition above) whenever this file's scoring
+        # arithmetic changes, even if the change looks small.
         "formula_version": FORMULA_VERSION,
         "state": stats["state"],
         "passed_gate": gate["cleared"],
