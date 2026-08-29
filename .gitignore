@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+
+# Raw downloaded BTS zip/CSV dumps (multi-GB) - re-downloaded on demand by
+# airport_stats_tool.py on cache miss, not meant to be committed.
+data_cache/
+
+# Transient test-run logs from development, not part of the deliverable.
+*.log
+
+.idea/
