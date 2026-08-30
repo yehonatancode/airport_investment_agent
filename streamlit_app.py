@@ -75,9 +75,19 @@ def get_client() -> ClaudeSDKClient:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if message["role"] == "assistant":
+            # Replays the ALREADY-GENERATED text via speak() directly - no
+            # client.query()/run_turn() call, so zero new LLM or tool calls.
+            # This is deliberately separate from typing "read that again"
+            # into chat, which goes through the full agent pipeline and can
+            # produce a genuinely different answer (verified: it re-examined
+            # the data and added new caveats rather than repeating itself) -
+            # that's a real follow-up, this button is just "say it again."
+            if st.button("\U0001f501 Replay audio", key=f"replay_{idx}"):
+                speak(message["content"])
 
 prompt = st.chat_input("Ask about an airport...")
 if prompt:
