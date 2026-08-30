@@ -6,6 +6,9 @@ terminal expansion — built on the [Claude Agent SDK](https://code.claude.com/d
 (`ClaudeSDKClient`, `@tool`, `create_sdk_mcp_server`), backed by real public
 BTS aviation data and a deterministic (non-LLM) scoring engine.
 
+See [DESIGN.md](DESIGN.md) for the full scoring methodology, key tradeoffs,
+and design rationale behind this project.
+
 ## What it does
 
 - Fetches real per-airport stats (operations, delay minutes, passenger
