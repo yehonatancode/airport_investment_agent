@@ -16,13 +16,14 @@ Run with: streamlit run streamlit_app.py
 
 import asyncio
 import io
+import logging
+import multiprocessing
 import re
 import wave
 from pathlib import Path
 
 import streamlit as st
 from claude_agent_sdk import ClaudeSDKClient
-from piper import PiperVoice
 
 from cli import build_agent_options, run_turn
 
@@ -34,7 +35,7 @@ st.caption(
     "deterministic scoring engine - see DESIGN.md for methodology."
 )
 
-speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=True)
+speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=False)
 voice_preset = st.sidebar.radio("Voice", ["Female", "Male", "Bot"], index=0, horizontal=True)
 
 # Generation is server-side now (Piper - local, offline, neural TTS; no
@@ -59,13 +60,28 @@ VOICE_MODELS = {
 }
 
 
-@st.cache_resource
-def _load_piper_voice(preset: str) -> PiperVoice:
-    # Cached process-wide (st.cache_resource, not per-session state) since
-    # loading an ONNX model is the slow part (~0.5s) - synthesis itself is
-    # fast once loaded. Missing model files raise here with a clear path,
-    # rather than failing silently on first speak() call.
-    return PiperVoice.load(str(VOICE_MODELS[preset]))
+def _synthesize_worker(model_path: str, text: str, length_scale: float | None, queue) -> None:
+    """Runs in a separate OS process (see speak() below). Must stay a
+    module-level function, not a closure, so it's picklable for spawn.
+
+    Loads its own PiperVoice rather than reusing a cached one - a loaded
+    PiperVoice (wraps a native onnxruntime session) doesn't reliably cross
+    a process boundary, so this pays the ~0.5s load cost again every call.
+    That's the deliberate tradeoff for real crash isolation (see speak()).
+    """
+    try:
+        from piper import PiperVoice, SynthesisConfig
+
+        voice = PiperVoice.load(model_path)
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            if length_scale is not None:
+                voice.synthesize_wav(text, wav_file, syn_config=SynthesisConfig(length_scale=length_scale))
+            else:
+                voice.synthesize_wav(text, wav_file)
+        queue.put(("ok", buffer.getvalue()))
+    except Exception as exc:  # noqa: BLE001 - reporting back to the parent, not swallowing
+        queue.put(("error", str(exc)))
 
 
 def speak(text: str, preset: str = "Female") -> None:
@@ -74,39 +90,59 @@ def speak(text: str, preset: str = "Female") -> None:
     (never from the message-history replay loop above, except via the
     explicit Replay button which calls this directly too), so old messages
     aren't re-spoken automatically on every Streamlit rerun.
+
+    Voice is a bonus feature layered on top of the real agent, and it must
+    never be able to take the text answer down with it. A plain try/except
+    around synthesize_wav() was tried first and does NOT work: a broken
+    local espeak-ng install fails at the native (C) layer with a hard
+    process exit, not a raised Python exception - nothing in-process can
+    catch that. So synthesis runs in a separate OS process instead; if
+    that child process aborts, only it dies - this (Streamlit) process is
+    unaffected and keeps running normally. On any failure (crash, timeout,
+    caught exception in the worker), this logs server-side, shows a small
+    inline note, and returns - the text response above it has already
+    rendered and stays intact either way.
     """
     # Strip markdown table pipes/asterisks so speech doesn't read out
     # formatting characters - a light cleanup, not a full markdown parser.
     clean = re.sub(r"[|#*_`]", " ", text)
+    length_scale = 0.9 if preset == "Bot" else None
+    model_path = str(VOICE_MODELS[preset])
 
-    # Scoped tightly around the synthesis call only (model load + WAV
-    # generation - the real, measured cost, ~0.5-2s depending on response
-    # length) - not around st.audio() itself, so the spinner clears the
-    # instant the player is ready rather than lingering over it, and never
-    # wraps message rendering or tool-call captions (those already happen
-    # before speak() is called at both call sites - the main turn handler
-    # and the Replay button).
     with st.spinner("\U0001f50a Generating audio..."):
-        voice = _load_piper_voice(preset)
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            if preset == "Bot":
-                # danny-low is already the deliberately robotic choice (a
-                # genuinely lower-quality model, not a parameter hack on a
-                # good one). Piper's SynthesisConfig has no native pitch
-                # control - only length_scale (speech rate) is available to
-                # nudge further; a lower value shortens phoneme duration,
-                # i.e. speaks faster.
-                from piper import SynthesisConfig
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_synthesize_worker, args=(model_path, clean, length_scale, result_queue)
+        )
+        proc.start()
+        proc.join(timeout=30)
 
-                voice.synthesize_wav(
-                    clean, wav_file, syn_config=SynthesisConfig(length_scale=0.9)
-                )
-            else:
-                voice.synthesize_wav(clean, wav_file)
-        audio_bytes = buffer.getvalue()
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+            status, payload = "timeout", None
+        elif proc.exitcode != 0:
+            # Non-zero (or negative, meaning killed by signal - e.g. a
+            # native abort) exit code: the worker process crashed before it
+            # could report anything back through the queue.
+            status, payload = f"crashed (exit code {proc.exitcode})", None
+        else:
+            try:
+                status, payload = result_queue.get_nowait()
+            except Exception:
+                status, payload = "no_result_returned", None
 
-    st.audio(audio_bytes, format="audio/wav", autoplay=True)
+    if status != "ok":
+        logging.warning(
+            "TTS synthesis failed (preset=%s, reason=%s) - skipping audio for this turn",
+            preset,
+            status,
+        )
+        st.caption("\U0001f507 Voice unavailable for this response.")
+        return
+
+    st.audio(payload, format="audio/wav", autoplay=True)
 
 
 def get_event_loop() -> asyncio.AbstractEventLoop:
