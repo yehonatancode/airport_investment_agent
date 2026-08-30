@@ -36,7 +36,12 @@ st.caption(
 )
 
 speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=False)
-voice_preset = st.sidebar.radio("Voice", ["Female", "Male", "Bot"], index=0, horizontal=True)
+voice_preset = st.sidebar.radio(
+    "Voice", ["Female", "Male", "Bot"], index=1, horizontal=True
+)  # Male default. Piper synthesis has an intermittent subprocess timeout
+   # observed across all three presets (not Female-specific, not fixed by
+   # this default) - see DESIGN.md. Any preset can still hit it; when it
+   # does, the existing timeout/crash isolation below handles it gracefully.
 
 # Generation is server-side now (Piper - local, offline, neural TTS; no
 # browser API, no paid/API-based service). Each preset maps to a real,
