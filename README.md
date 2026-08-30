@@ -84,4 +84,3 @@ its already-generated text directly - no new LLM or tool call.
 | `streamlit_app.py` | Browser chat UI, reuses `cli.py`'s agent logic |
 | `generate_cache.py` | Builds `airport_stats_cache.json` |
 | `DESIGN.md` | Assumptions, tradeoffs, and known limitations |
-| `toy_tool.py` | Minimal reference example of the SDK's `@tool` pattern |
