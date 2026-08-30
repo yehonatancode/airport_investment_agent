@@ -13,3 +13,7 @@ data_cache/
 
 # Local working draft - final DESIGN.md is written by hand from this, not committed as-is.
 DESIGN_DRAFT.md
+
+# Downloaded Piper voice models (~180MB) - re-downloadable via
+# `python3 -m piper.download_voices`, same pattern as data_cache/.
+piper_voices/

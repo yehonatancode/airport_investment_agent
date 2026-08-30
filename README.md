@@ -59,6 +59,21 @@ multi-GB). `airport_stats_cache.json` in this repo pre-computes scores for
 airports) so most queries resolve instantly without that wait; anything
 outside the cache still resolves correctly, just live.
 
+### Voice (web UI only)
+
+The web UI speaks each response aloud via [Piper](https://github.com/OHF-voice/piper1-gpl)
+(local, offline, neural TTS - no API key, no paid service) and offers three
+voice presets (Female/Male/Bot). Download the three voice models once
+before first use (~180MB, gitignored, same pattern as `data_cache/`):
+
+```bash
+python3 -m piper.download_voices --download-dir piper_voices \
+    en_US-hfc_female-medium en_US-hfc_male-medium en_US-danny-low
+```
+
+A "\U0001f501 Replay audio" button under each assistant message re-speaks
+its already-generated text directly - no new LLM or tool call.
+
 ## Files
 
 | File | Purpose |
