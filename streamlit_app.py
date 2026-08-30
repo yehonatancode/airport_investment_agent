@@ -192,15 +192,31 @@ if prompt:
         with st.spinner("Working..."):
             events = get_event_loop().run_until_complete(run_turn(get_client(), prompt))
 
-        reply_text_parts = []
+            # Persist the result immediately, still inside the spinner
+            # block. A session_state write is a plain dict operation, not a
+            # Streamlit command, so it can't itself be caught by a pending
+            # rerun checkpoint (Streamlit only checks for those on st.*
+            # calls - see the diagnosis in the conversation). Previously
+            # this append happened after the render loop below; if a rerun
+            # was requested while run_until_complete() was in flight (e.g.
+            # the "Speak responses aloud" toggle clicked mid-query), the
+            # pending exception fired at the next st.* call - which used to
+            # be BEFORE this append ran - so a fully-generated answer was
+            # silently discarded. Appending here, before any further st.*
+            # call, means the answer survives even through an interrupted
+            # run: if the exception does fire right after this line, the
+            # next script run's history-render loop (above) just picks the
+            # already-stored message up and displays it normally.
+            reply_text = "\n\n".join(
+                event["content"] for event in events if event["type"] == "text"
+            )
+            st.session_state.messages.append({"role": "assistant", "content": reply_text})
+
         for event in events:
             if event["type"] == "tool_call":
                 st.caption(f"\U0001f527 called `{event['name']}`  `{event['input']}`")
             elif event["type"] == "text":
                 st.markdown(event["content"])
-                reply_text_parts.append(event["content"])
 
-    reply_text = "\n\n".join(reply_text_parts)
-    st.session_state.messages.append({"role": "assistant", "content": reply_text})
     if speak_enabled and reply_text:
         speak(reply_text, preset=voice_preset)
