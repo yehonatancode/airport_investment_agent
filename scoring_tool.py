@@ -349,7 +349,7 @@ async def rank_airports_in_region_tool(args):
         }
 
     top_pct = args.get("top_pct")
-    codes = airports_in_region(states, CURRENT_YEAR, CURRENT_MONTH)
+    codes = airports_in_region(states, CURRENT_YEAR, CURRENT_MONTH, region_name=region)
     result = rank_airports(codes, top_pct=top_pct)
     result["region"] = args["region"]
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=str)}]}

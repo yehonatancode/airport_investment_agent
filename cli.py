@@ -66,6 +66,15 @@ def build_agent_options() -> ClaudeAgentOptions:
     """
     return ClaudeAgentOptions(
         mcp_servers={"airport_data": data_server, "airport_scoring": scoring_server},
+        # tools=[] disables the entire built-in Claude Code toolset (Bash,
+        # Read, Edit, Task, etc.) - none of which this agent ever needs.
+        # allowed_tools alone doesn't do this: it only controls which tools
+        # can be auto-invoked without a permission prompt, not which tools
+        # are advertised to the model at all. With only 3 tools left to
+        # advertise, the model doesn't need a ToolSearch round trip to
+        # discover them - measured ~15-20% latency reduction on multi-tool
+        # queries (see DESIGN.md).
+        tools=[],
         allowed_tools=[
             "mcp__airport_data__fetch_airport_stats",
             "mcp__airport_scoring__score_airport",

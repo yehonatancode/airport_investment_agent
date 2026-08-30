@@ -15,16 +15,14 @@ Run with: streamlit run streamlit_app.py
 """
 
 import asyncio
-import io
 import logging
-import multiprocessing
 import re
-import wave
 from pathlib import Path
 
 import streamlit as st
 from claude_agent_sdk import ClaudeSDKClient
 
+import piper_worker
 from cli import build_agent_options, run_turn
 
 st.set_page_config(page_title="Airport Investment Agent", page_icon="\U0001f6eb")
@@ -34,14 +32,6 @@ st.caption(
     "strong candidates for terminal expansion. Backed by real BTS data and a "
     "deterministic scoring engine - see DESIGN.md for methodology."
 )
-
-speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=False)
-voice_preset = st.sidebar.radio(
-    "Voice", ["Female", "Male", "Bot"], index=1, horizontal=True
-)  # Male default. Piper synthesis has an intermittent subprocess timeout
-   # observed across all three presets (not Female-specific, not fixed by
-   # this default) - see DESIGN.md. Any preset can still hit it; when it
-   # does, the existing timeout/crash isolation below handles it gracefully.
 
 # Generation is server-side now (Piper - local, offline, neural TTS; no
 # browser API, no paid/API-based service). Each preset maps to a real,
@@ -65,78 +55,92 @@ VOICE_MODELS = {
 }
 
 
-def _synthesize_worker(model_path: str, text: str, length_scale: float | None, queue) -> None:
-    """Runs in a separate OS process (see speak() below). Must stay a
-    module-level function, not a closure, so it's picklable for spawn.
-
-    Loads its own PiperVoice rather than reusing a cached one - a loaded
-    PiperVoice (wraps a native onnxruntime session) doesn't reliably cross
-    a process boundary, so this pays the ~0.5s load cost again every call.
-    That's the deliberate tradeoff for real crash isolation (see speak()).
+@st.cache_resource(show_spinner="\U0001f50a Starting voice engine...")
+def get_piper_worker():
+    """Starts the persistent Piper worker exactly once for the life of
+    this server process (st.cache_resource - shared across all browser
+    sessions, survives every script rerun). This is a startup health
+    check: it happens right now, at first page load, not lazily deferred
+    to a user's first message - and it retries with a fresh process
+    (start_worker's own backoff) rather than silently deferring failure
+    discovery to a random later request. Returns None if every attempt
+    failed; the sidebar below surfaces that immediately.
     """
-    try:
-        from piper import PiperVoice, SynthesisConfig
+    return piper_worker.start_worker({preset: str(path) for preset, path in VOICE_MODELS.items()})
 
-        voice = PiperVoice.load(model_path)
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            if length_scale is not None:
-                voice.synthesize_wav(text, wav_file, syn_config=SynthesisConfig(length_scale=length_scale))
-            else:
-                voice.synthesize_wav(text, wav_file)
-        queue.put(("ok", buffer.getvalue()))
-    except Exception as exc:  # noqa: BLE001 - reporting back to the parent, not swallowing
-        queue.put(("error", str(exc)))
+
+_piper = None
+speak_enabled = False
+voice_preset = "Male"
+
+# Real bug, found after the first port to this repo: get_piper_worker()
+# calls ctx.Process(...).start() (spawn context). On spawn, the child
+# process's bootstrap unconditionally re-executes this whole script via
+# runpy to reconstruct __main__ (needed so pickled objects referencing
+# __main__ can be resolved) - and that reconstruction reaches this exact
+# line again, tries to start ANOTHER child, and trips multiprocessing's
+# own "not fully bootstrapped yet" guard. This is real - reproduced with
+# a genuine Playwright-driven browser session against a real `streamlit
+# run` process, not just a test-harness artifact (see the conversation).
+#
+# multiprocessing.freeze_support() - the fix Python's own error message
+# suggests - is a no-op on macOS/Linux (confirmed via source: it only
+# does anything on Windows with a frozen/frozen-to-.exe interpreter), so
+# it would not have fixed this here.
+#
+# What actually distinguishes the two contexts: Streamlit's real
+# ScriptRunner always execs this script as a module literally named
+# "__main__" (every rerun); multiprocessing's spawn reconstruction runs
+# it via runpy.run_path(main_path, run_name="__mp_main__") - a different
+# name. So a plain __name__ check reliably tells the two apart, even
+# though Streamlit's own docs warn "if __name__ == '__main__'" doesn't
+# mean what it normally would in a Streamlit script (their concern is
+# that it's True on every real rerun, not just a literal first launch -
+# a different issue from what's being guarded against here).
+if __name__ == "__main__":
+    _piper = get_piper_worker()
+
+    if _piper is None:
+        st.sidebar.warning(
+            "\U0001f507 Voice unavailable this session - failed to start after 3 attempts. "
+            "See server log for details."
+        )
+    else:
+        speak_enabled = st.sidebar.checkbox("\U0001f50a Speak responses aloud", value=False)
+        voice_preset = st.sidebar.radio(
+            "Voice", ["Female", "Male", "Bot"], index=1, horizontal=True
+        )  # Male default - arbitrary, all three presets are equally reliable now
+           # that voice loading happens once at startup instead of per call.
 
 
 def speak(text: str, preset: str = "Female") -> None:
-    """Generates audio server-side via Piper and plays it back through
-    st.audio(autoplay=True). Only called once per NEW assistant reply
-    (never from the message-history replay loop above, except via the
-    explicit Replay button which calls this directly too), so old messages
-    aren't re-spoken automatically on every Streamlit rerun.
+    """Generates audio via the persistent Piper worker (piper_worker.py)
+    and plays it back through st.audio(autoplay=True). Only called once
+    per NEW assistant reply (never from the message-history replay loop
+    above, except via the explicit Replay button which calls this
+    directly too), so old messages aren't re-spoken automatically on
+    every Streamlit rerun.
 
-    Voice is a bonus feature layered on top of the real agent, and it must
-    never be able to take the text answer down with it. A plain try/except
-    around synthesize_wav() was tried first and does NOT work: a broken
-    local espeak-ng install fails at the native (C) layer with a hard
-    process exit, not a raised Python exception - nothing in-process can
-    catch that. So synthesis runs in a separate OS process instead; if
-    that child process aborts, only it dies - this (Streamlit) process is
-    unaffected and keeps running normally. On any failure (crash, timeout,
-    caught exception in the worker), this logs server-side, shows a small
-    inline note, and returns - the text response above it has already
-    rendered and stays intact either way.
+    Voice is a bonus feature layered on top of the real agent, and it
+    must never be able to take the text answer down with it. That's why
+    synthesis still runs in a separate OS process (the persistent
+    worker) rather than in-process: a broken local espeak-ng install
+    fails at the native (C) layer with a hard process abort, not a
+    raised Python exception - nothing in-process could catch that. If
+    the worker process dies or hangs, only it is affected; this
+    (Streamlit) process keeps running normally. On any failure (worker
+    unavailable, dead, timed out, or a caught exception inside it), this
+    logs server-side, shows a small inline note, and returns - the text
+    response above it has already rendered and stays intact either way.
+    This is the same graceful-degradation safety net as before, just
+    talking to a long-lived worker instead of spawning a fresh one.
     """
     # Strip markdown table pipes/asterisks so speech doesn't read out
     # formatting characters - a light cleanup, not a full markdown parser.
     clean = re.sub(r"[|#*_`]", " ", text)
-    length_scale = 0.9 if preset == "Bot" else None
-    model_path = str(VOICE_MODELS[preset])
 
     with st.spinner("\U0001f50a Generating audio..."):
-        ctx = multiprocessing.get_context("spawn")
-        result_queue = ctx.Queue()
-        proc = ctx.Process(
-            target=_synthesize_worker, args=(model_path, clean, length_scale, result_queue)
-        )
-        proc.start()
-        proc.join(timeout=30)
-
-        if proc.is_alive():
-            proc.terminate()
-            proc.join()
-            status, payload = "timeout", None
-        elif proc.exitcode != 0:
-            # Non-zero (or negative, meaning killed by signal - e.g. a
-            # native abort) exit code: the worker process crashed before it
-            # could report anything back through the queue.
-            status, payload = f"crashed (exit code {proc.exitcode})", None
-        else:
-            try:
-                status, payload = result_queue.get_nowait()
-            except Exception:
-                status, payload = "no_result_returned", None
+        status, payload = piper_worker.synthesize(_piper, clean, preset)
 
     if status != "ok":
         logging.warning(
